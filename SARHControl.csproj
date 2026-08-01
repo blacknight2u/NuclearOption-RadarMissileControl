@@ -5,9 +5,9 @@
     <Nullable>disable</Nullable>
     <AssemblyName>SARHControl</AssemblyName>
     <RootNamespace>Blacknight2u.SARHControl</RootNamespace>
-    <Version>0.4.1</Version>
+    <Version>0.5.0</Version>
     <Authors>blacknight2u</Authors>
-    <Description>Host-controlled SARH and ARH difficulty modes for AI missiles targeting human pilots in Nuclear Option.</Description>
+    <Description>Host-configurable SARH and ARH missile scope, guidance, accuracy, thrust, speed, and disable modes for Nuclear Option.</Description>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDependencyFile>false</GenerateDependencyFile>
     <DebugType>embedded</DebugType>
