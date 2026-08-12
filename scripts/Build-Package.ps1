@@ -7,10 +7,20 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $projectRoot 'SARHControl.csproj'
-$version = '0.5.0'
+[xml]$projectXml = Get-Content -LiteralPath $project -Raw
+$version = [string]$projectXml.Project.PropertyGroup.Version
+if ([string]::IsNullOrWhiteSpace($version)) {
+    throw 'SARHControl.csproj does not define a Version.'
+}
+$pluginSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\Plugin.cs') -Raw
+$pluginVersionMatch = [regex]::Match($pluginSource, 'PluginVersion\s*=\s*"([^"]+)"')
+if (!$pluginVersionMatch.Success -or $pluginVersionMatch.Groups[1].Value -ne $version) {
+    throw "Plugin.cs version does not match SARHControl.csproj version $version."
+}
 $modId = 'blacknight2u.sarhcontrol'
 $displayName = 'Radar Missile Control'
-$description = 'Host-configurable radar missile rules for SARH and ARH weapons. Press F7 to choose player/AI launch-target routes and adjust guidance, accuracy, thrust, and speed; F8 cycles OFF (VANILLA), NERFED, and DISABLED. Gameplay remains host-authoritative.'
+$description = 'Host-controlled SARH and ARH missile presets. Press F7 to configure missile types, AI/player engagements, guidance, accuracy, thrust, and speed. Press F8 to cycle Vanilla, Preset 1, and Preset 2. Multiplayer settings remain host-authoritative.'
+$gameVersion = '0.34.1'
 $tags = @('gameplay', 'difficulty', 'sarh', 'arh', 'configurable', 'host-only', 'multiplayer')
 $authors = @('blacknight2u')
 $githubOwner = 'blacknight2u'
@@ -56,7 +66,7 @@ $meta = [ordered]@{
         version = $version
         category = 'release'
         type = 'plugin'
-        gameVersion = '0.34.1'
+        gameVersion = $gameVersion
         downloadUrl = $downloadUrl
         hash = $null
         extends = $null
@@ -88,7 +98,7 @@ $manifest = [ordered]@{
             version = $version
             category = 'release'
             type = 'plugin'
-            gameVersion = '0.34.1'
+            gameVersion = $gameVersion
             downloadUrl = $downloadUrl
             hash = "sha256:$zipHash"
             dependencies = @()

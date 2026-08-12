@@ -4,7 +4,6 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using BepInEx;
 using BepInEx.Configuration;
-using BepInEx.Logging;
 using HarmonyLib;
 using Mirage;
 using Mirage.Serialization;
@@ -13,7 +12,7 @@ using UnityEngine;
 
 namespace Blacknight2u.SARHControl
 {
-    public enum SarhMode
+    internal enum LegacyMode
     {
         Vanilla = 0,
         Nerfed = 1,
@@ -21,7 +20,15 @@ namespace Blacknight2u.SARHControl
         Nerf50 = Nerfed,
         [Obsolete("Legacy configuration name; use Nerfed.")]
         Nerf80 = Nerfed,
+        // Kept only so v0.5.0 configuration files can be migrated.
         Disabled = 2
+    }
+
+    public enum ActivePreset
+    {
+        Vanilla = 0,
+        Preset1 = 1,
+        Preset2 = 2
     }
 
     [Flags]
@@ -42,15 +49,7 @@ namespace Blacknight2u.SARHControl
     internal struct SarhStatusMessage
     {
         internal byte ProtocolVersion;
-        internal byte Mode;
-        internal byte SeekerMask;
-        internal byte EngagementMask;
-        internal byte TrackingPercent;
-        internal byte LockPercent;
-        internal byte JamPercent;
-        internal byte ThrustPercent;
-        internal byte SpeedPercent;
-        internal byte AimErrorTenths;
+        internal byte ActivePreset;
     }
 
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
@@ -59,33 +58,39 @@ namespace Blacknight2u.SARHControl
     {
         public const string PluginGuid = "blacknight2u.sarhcontrol";
         public const string PluginName = "Radar Missile Control";
-        public const string PluginVersion = "0.5.0";
+        public const string PluginVersion = "0.5.1";
 
-        private const byte ProtocolVersion = 4;
-        private const float NoticeWidth = 620f;
+        private const byte ProtocolVersion = 6;
         private const float SettingsWindowWidth = 520f;
         private const int SettingsWindowId = 5393747;
-        private static ConfigEntry<SarhMode> mode;
+        private sealed class PresetConfig
+        {
+            internal ConfigEntry<bool> AffectSarh;
+            internal ConfigEntry<bool> AffectArh;
+            internal ConfigEntry<bool> AiToPlayer;
+            internal ConfigEntry<bool> AiToAi;
+            internal ConfigEntry<bool> PlayerToAi;
+            internal ConfigEntry<bool> PlayerToPlayer;
+            internal ConfigEntry<float> TrackingPercent;
+            internal ConfigEntry<float> LockPercent;
+            internal ConfigEntry<float> JamPercent;
+            internal ConfigEntry<float> ThrustPercent;
+            internal ConfigEntry<float> SpeedPercent;
+            internal ConfigEntry<float> AimErrorPercent;
+        }
+
+        private static ConfigEntry<int> configurationVersion;
+        private static ConfigEntry<ActivePreset> activePreset;
         private static ConfigEntry<KeyboardShortcut> toggleShortcut;
         private static ConfigEntry<KeyboardShortcut> panelShortcut;
-        private static ConfigEntry<bool> affectSarh;
-        private static ConfigEntry<bool> affectArh;
-        private static ConfigEntry<bool> affectAiToPlayer;
-        private static ConfigEntry<bool> affectAiToAi;
-        private static ConfigEntry<bool> affectPlayerToAi;
-        private static ConfigEntry<bool> affectPlayerToPlayer;
-        private static ConfigEntry<float> trackingPercent;
-        private static ConfigEntry<float> lockPercent;
-        private static ConfigEntry<float> jamPercent;
-        private static ConfigEntry<float> thrustPercent;
-        private static ConfigEntry<float> speedPercent;
-        private static ConfigEntry<float> aimErrorPercent;
+        private static PresetConfig preset1;
+        private static PresetConfig preset2;
         private readonly HashSet<INetworkPlayer> moddedClients = new HashSet<INetworkPlayer>();
         private Harmony harmony;
         private MessageHandler clientHandler;
         private MessageHandler serverHandler;
         private NetworkClient registeredClient;
-        private string synchronizedStatusSignature;
+        private byte? synchronizedActivePreset;
         private GUIStyle noticeStyle;
         private GUIStyle sectionStyle;
         private GUIStyle hintStyle;
@@ -99,7 +104,7 @@ namespace Blacknight2u.SARHControl
         private bool previousCursorVisible;
         private bool applyingSettings;
 
-        private SarhMode draftMode;
+        private int editingPreset = 1;
         private bool draftAffectSarh;
         private bool draftAffectArh;
         private bool draftAiToPlayer;
@@ -113,14 +118,15 @@ namespace Blacknight2u.SARHControl
         private float draftSpeedPercent;
         private float draftAimErrorPercent;
 
-        internal static ManualLogSource Log { get; private set; }
-        internal static SarhMode CurrentMode => mode?.Value ?? SarhMode.Vanilla;
-        internal static float TrackingMultiplier => ReadPercent(trackingPercent, 50f);
-        internal static float LockMultiplier => ReadPercent(lockPercent, 50f);
-        internal static float JamMultiplier => ReadPercent(jamPercent, 50f);
-        internal static float ThrustMultiplier => ReadPercent(thrustPercent, 50f);
-        internal static float SpeedMultiplier => ReadPercent(speedPercent, 50f);
-        internal static float AimErrorFraction => Mathf.Clamp((aimErrorPercent?.Value ?? 4f) / 100f, 0f, 0.1f);
+        internal static ActivePreset CurrentActivePreset => activePreset?.Value ?? ActivePreset.Vanilla;
+        private static PresetConfig CurrentPreset => CurrentActivePreset == ActivePreset.Preset2 ? preset2 : preset1;
+        internal static bool PresetActive => CurrentActivePreset != ActivePreset.Vanilla;
+        internal static float TrackingMultiplier => ReadPercent(CurrentPreset?.TrackingPercent, 50f);
+        internal static float LockMultiplier => ReadPercent(CurrentPreset?.LockPercent, 50f);
+        internal static float JamMultiplier => ReadPercent(CurrentPreset?.JamPercent, 50f);
+        internal static float ThrustMultiplier => ReadPercent(CurrentPreset?.ThrustPercent, 50f);
+        internal static float SpeedMultiplier => ReadPercent(CurrentPreset?.SpeedPercent, 50f);
+        internal static float AimErrorFraction => Mathf.Clamp((CurrentPreset?.AimErrorPercent.Value ?? 4f) / 100f, 0f, 0.1f);
 
         internal static bool IsAuthoritativeHost
         {
@@ -133,46 +139,20 @@ namespace Blacknight2u.SARHControl
 
         private void Awake()
         {
-            Log = Logger;
-            mode = Config.Bind(
-                "General",
-                "Host mode",
-                SarhMode.Nerfed,
-                "Used only by the host or dedicated server. Nerfed uses the configurable guidance, accuracy, thrust, and speed values. Warhead damage remains vanilla."
-            );
-            toggleShortcut = Config.Bind(
-                "General",
-                "Host toggle shortcut",
-                new KeyboardShortcut(KeyCode.F8),
-                "Host-only shortcut that cycles Nerfed, Disabled, and Vanilla/off. Clients cannot change the server mode."
-            );
+            configurationVersion = Config.Bind("General", "Configuration version", 0, "Internal migration version. Do not edit.");
+            if (configurationVersion.Value < 1)
+            {
+                MigrateLegacyConfiguration();
+            }
+            else
+            {
+                BindCurrentConfiguration();
+            }
             panelShortcut = Config.Bind(
                 "General",
                 "Host settings shortcut",
                 new KeyboardShortcut(KeyCode.F7),
                 "Host-only shortcut that opens or closes the in-game Radar Missile Control panel."
-            );
-
-            affectSarh = Config.Bind("Missile types", "Affect SARH", true, "Apply the selected mode to semi-active radar-homing missiles.");
-            affectArh = Config.Bind("Missile types", "Affect ARH", true, "Apply the selected mode to active radar-homing missiles.");
-
-            affectAiToPlayer = Config.Bind("Engagements", "AI to Player", true, "Affect AI-launched missiles targeting a human-controlled aircraft.");
-            affectAiToAi = Config.Bind("Engagements", "AI to AI", false, "Affect AI-launched missiles targeting AI units.");
-            affectPlayerToAi = Config.Bind("Engagements", "Player to AI", false, "Affect player-launched missiles targeting AI units.");
-            affectPlayerToPlayer = Config.Bind("Engagements", "Player to Player", false, "Affect player-launched missiles targeting another human-controlled aircraft.");
-
-            trackingPercent = BindPercent("Tracking strength", 50f, "Radar tracking strength remaining in Nerfed mode.");
-            lockPercent = BindPercent("Lock persistence", 50f, "Seeker lock persistence remaining in Nerfed mode.");
-            jamPercent = BindPercent("Jam tolerance", 50f, "Seeker resistance to jamming remaining in Nerfed mode.");
-            thrustPercent = BindPercent("Motor thrust", 50f, "Missile motor thrust remaining in Nerfed mode.");
-            speedPercent = BindPercent("Top speed", 50f, "Each missile motor's top-speed limit remaining in Nerfed mode.");
-            aimErrorPercent = Config.Bind(
-                "Nerfed mode",
-                "Aim error percent of range",
-                4f,
-                new ConfigDescription(
-                    "Moving aim error as a percentage of remaining range, clamped to 25-400 meters. Zero disables added aim error.",
-                    new AcceptableValueRange<float>(0f, 10f))
             );
 
             SubscribeSettings();
@@ -187,7 +167,143 @@ namespace Blacknight2u.SARHControl
             SarhNetworkProtocol.RegisterSerializers();
             harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(Plugin).Assembly);
-            Logger.LogInfo($"{PluginName} {PluginVersion} loaded. HostMode={CurrentMode}.");
+            Logger.LogInfo($"{PluginName} {PluginVersion} loaded. Active={CurrentActivePreset}.");
+        }
+
+        private void BindCurrentConfiguration()
+        {
+            activePreset = Config.Bind("General", "Active preset", ActivePreset.Vanilla,
+                "F8 cycles Vanilla, Preset 1, and Preset 2. Only the host/server controls the active preset.");
+            toggleShortcut = Config.Bind("General", "Cycle shortcut", new KeyboardShortcut(KeyCode.F8),
+                "Host-only shortcut that cycles Vanilla, Preset 1, and Preset 2.");
+            preset1 = BindPreset("Preset 1", true, true, true, false, false, false,
+                50f, 50f, 50f, 50f, 50f, 4f);
+            preset2 = BindPreset("Preset 2", true, true, true, false, false, false,
+                0f, 0f, 0f, 0f, 0f, 0f);
+            RemoveUnusedPresetSettings();
+        }
+
+        private void MigrateLegacyConfiguration()
+        {
+            ConfigEntry<LegacyMode> legacyHostMode = Config.Bind("General", "Host mode", LegacyMode.Nerfed, "Legacy setting.");
+            Config.Bind("General", "Mode", legacyHostMode.Value, "Legacy setting.");
+            ConfigEntry<KeyboardShortcut> legacyHostToggle = Config.Bind("General", "Host toggle shortcut", new KeyboardShortcut(KeyCode.F8), "Legacy setting.");
+            Config.Bind("General", "Toggle shortcut", legacyHostToggle.Value, "Legacy setting.");
+            ConfigEntry<bool> oldSarh = Config.Bind("Missile types", "Affect SARH", true, "Legacy setting.");
+            ConfigEntry<bool> oldArh = Config.Bind("Missile types", "Affect ARH", true, "Legacy setting.");
+            ConfigEntry<bool> oldAiPlayer = Config.Bind("Engagements", "AI to Player", true, "Legacy setting.");
+            ConfigEntry<bool> oldAiAi = Config.Bind("Engagements", "AI to AI", false, "Legacy setting.");
+            ConfigEntry<bool> oldPlayerAi = Config.Bind("Engagements", "Player to AI", false, "Legacy setting.");
+            ConfigEntry<bool> oldPlayerPlayer = Config.Bind("Engagements", "Player to Player", false, "Legacy setting.");
+            ConfigEntry<float> oldTracking = BindPercent("Nerfed mode", "Tracking strength", 50f, "Legacy setting.");
+            ConfigEntry<float> oldLock = BindPercent("Nerfed mode", "Lock persistence", 50f, "Legacy setting.");
+            ConfigEntry<float> oldJam = BindPercent("Nerfed mode", "Jam tolerance", 50f, "Legacy setting.");
+            ConfigEntry<float> oldThrust = BindPercent("Nerfed mode", "Motor thrust", 50f, "Legacy setting.");
+            ConfigEntry<float> oldSpeed = BindPercent("Nerfed mode", "Top speed", 50f, "Legacy setting.");
+            ConfigEntry<float> oldAim = BindAimError("Nerfed mode", 4f);
+
+            LegacyMode oldMode = legacyHostMode.Value;
+            activePreset = Config.Bind("General", "Active preset",
+                oldMode == LegacyMode.Vanilla ? ActivePreset.Vanilla :
+                oldMode == LegacyMode.Disabled ? ActivePreset.Preset2 : ActivePreset.Preset1,
+                "F8 cycles Vanilla, Preset 1, and Preset 2.");
+            toggleShortcut = Config.Bind("General", "Cycle shortcut", legacyHostToggle.Value,
+                "Host-only shortcut that cycles Vanilla, Preset 1, and Preset 2.");
+            preset1 = BindPreset("Preset 1",
+                true, true, true, false, false, false, 50f, 50f, 50f, 50f, 50f, 4f);
+            preset2 = BindPreset("Preset 2",
+                true, true, true, false, false, false, 0f, 0f, 0f, 0f, 0f, 0f);
+
+            SetPreset(preset1,
+                oldSarh.Value, oldArh.Value, oldAiPlayer.Value, oldAiAi.Value, oldPlayerAi.Value, oldPlayerPlayer.Value,
+                oldTracking.Value, oldLock.Value, oldJam.Value, oldThrust.Value, oldSpeed.Value, oldAim.Value);
+            SetPresetScope(preset2,
+                oldSarh.Value, oldArh.Value, oldAiPlayer.Value, oldAiAi.Value, oldPlayerAi.Value, oldPlayerPlayer.Value);
+
+            configurationVersion.Value = 1;
+            RemoveLegacyConfiguration();
+            Config.Save();
+            Logger.LogInfo("Migrated v0.5.0 settings into Preset 1; Preset 2 keeps the same scope and uses editable defaults.");
+        }
+
+        private PresetConfig BindPreset(string section,
+            bool sarh, bool arh, bool aiPlayer, bool aiAi, bool playerAi, bool playerPlayer,
+            float tracking, float lockPersistence, float jam, float thrust, float speed, float aimError)
+        {
+            PresetConfig preset = new PresetConfig
+            {
+                AffectSarh = Config.Bind(section, "Affect SARH", sarh, "Affect semi-active radar-homing missiles."),
+                AffectArh = Config.Bind(section, "Affect ARH", arh, "Affect active radar-homing missiles."),
+                AiToPlayer = Config.Bind(section, "AI to Player", aiPlayer, "Affect AI-launched missiles targeting a player."),
+                AiToAi = Config.Bind(section, "AI to AI", aiAi, "Affect AI-launched missiles targeting AI."),
+                PlayerToAi = Config.Bind(section, "Player to AI", playerAi, "Affect player-launched missiles targeting AI."),
+                PlayerToPlayer = Config.Bind(section, "Player to Player", playerPlayer, "Affect player-launched missiles targeting a player.")
+            };
+            preset.TrackingPercent = BindPercent(section, "Tracking strength", tracking, "Percent of vanilla tracking remaining.");
+            preset.LockPercent = BindPercent(section, "Lock persistence", lockPersistence, "Percent of vanilla lock persistence remaining.");
+            preset.JamPercent = BindPercent(section, "Jam tolerance", jam, "Percent of vanilla jam tolerance remaining.");
+            preset.ThrustPercent = BindPercent(section, "Motor thrust", thrust, "Percent of vanilla motor thrust remaining.");
+            preset.SpeedPercent = BindPercent(section, "Top speed", speed, "Percent of vanilla top-speed limit remaining.");
+            preset.AimErrorPercent = BindAimError(section, aimError);
+            return preset;
+        }
+
+        private ConfigEntry<float> BindPercent(string section, string key, float value, string description) =>
+            Config.Bind(section, key, value, new ConfigDescription(description, new AcceptableValueRange<float>(0f, 100f)));
+
+        private ConfigEntry<float> BindAimError(string section, float value) => Config.Bind(section,
+            "Aim error percent of range", value, new ConfigDescription(
+                "Moving aim error as a percentage of remaining range. Zero disables added error.",
+                new AcceptableValueRange<float>(0f, 10f)));
+
+        private static void SetPreset(PresetConfig preset,
+            bool sarh, bool arh, bool aiPlayer, bool aiAi, bool playerAi, bool playerPlayer,
+            float tracking, float lockPersistence, float jam, float thrust, float speed, float aimError)
+        {
+            SetPresetScope(preset, sarh, arh, aiPlayer, aiAi, playerAi, playerPlayer);
+            preset.TrackingPercent.Value = tracking;
+            preset.LockPercent.Value = lockPersistence;
+            preset.JamPercent.Value = jam;
+            preset.ThrustPercent.Value = thrust;
+            preset.SpeedPercent.Value = speed;
+            preset.AimErrorPercent.Value = aimError;
+        }
+
+        private static void SetPresetScope(PresetConfig preset,
+            bool sarh, bool arh, bool aiPlayer, bool aiAi, bool playerAi, bool playerPlayer)
+        {
+            preset.AffectSarh.Value = sarh;
+            preset.AffectArh.Value = arh;
+            preset.AiToPlayer.Value = aiPlayer;
+            preset.AiToAi.Value = aiAi;
+            preset.PlayerToAi.Value = playerAi;
+            preset.PlayerToPlayer.Value = playerPlayer;
+        }
+
+        private void RemoveLegacyConfiguration()
+        {
+            foreach (ConfigDefinition definition in new[]
+            {
+                new ConfigDefinition("General", "Host mode"), new ConfigDefinition("General", "Mode"),
+                new ConfigDefinition("General", "Host toggle shortcut"), new ConfigDefinition("General", "Toggle shortcut"),
+                new ConfigDefinition("Preset 1", "Effect"), new ConfigDefinition("Preset 2", "Effect"),
+                new ConfigDefinition("Missile types", "Affect SARH"), new ConfigDefinition("Missile types", "Affect ARH"),
+                new ConfigDefinition("Engagements", "AI to Player"), new ConfigDefinition("Engagements", "AI to AI"),
+                new ConfigDefinition("Engagements", "Player to AI"), new ConfigDefinition("Engagements", "Player to Player"),
+                new ConfigDefinition("Nerfed mode", "Tracking strength"), new ConfigDefinition("Nerfed mode", "Lock persistence"),
+                new ConfigDefinition("Nerfed mode", "Jam tolerance"), new ConfigDefinition("Nerfed mode", "Motor thrust"),
+                new ConfigDefinition("Nerfed mode", "Top speed"), new ConfigDefinition("Nerfed mode", "Aim error percent of range")
+            }) Config.Remove(definition);
+        }
+
+        private void RemoveUnusedPresetSettings()
+        {
+            bool removedAny = false;
+            foreach (ConfigDefinition definition in new[]
+            {
+                new ConfigDefinition("Preset 1", "Effect"), new ConfigDefinition("Preset 2", "Effect")
+            }) removedAny |= Config.Remove(definition);
+            if (removedAny) Config.Save();
         }
 
         private void Update()
@@ -226,39 +342,27 @@ namespace Blacknight2u.SARHControl
 
             if (IsAuthoritativeHost)
             {
-                mode.Value = NextMode(CurrentMode);
-                Config.Save();
-                draftMode = CurrentMode;
+                activePreset.Value = NextPreset(CurrentActivePreset);
                 ShowNotice(BuildLocalStatusNotice());
             }
             else if (IsConnectedClient())
             {
-                ShowNotice("Only the host/server can change radar missile mode");
+                ShowNotice("Only the host/server can change the radar missile preset");
             }
             else
             {
-                ShowNotice("Start singleplayer or host a server to change radar missile mode");
+                ShowNotice("Start singleplayer or host a server to change the radar missile preset");
             }
         }
 
-        private static SarhMode NextMode(SarhMode current)
+        private static ActivePreset NextPreset(ActivePreset current)
         {
             switch (current)
             {
-                case SarhMode.Nerfed: return SarhMode.Disabled;
-                case SarhMode.Disabled: return SarhMode.Vanilla;
-                default: return SarhMode.Nerfed;
+                case ActivePreset.Vanilla: return ActivePreset.Preset1;
+                case ActivePreset.Preset1: return ActivePreset.Preset2;
+                default: return ActivePreset.Vanilla;
             }
-        }
-
-        private ConfigEntry<float> BindPercent(string key, float defaultValue, string description)
-        {
-            return Config.Bind(
-                "Nerfed mode",
-                key,
-                defaultValue,
-                new ConfigDescription(description, new AcceptableValueRange<float>(0f, 100f))
-            );
         }
 
         private static float ReadPercent(ConfigEntry<float> entry, float fallback)
@@ -288,13 +392,14 @@ namespace Blacknight2u.SARHControl
 
             if (!string.IsNullOrEmpty(noticeText) && Time.unscaledTime < noticeUntil)
             {
-                float width = Mathf.Min(NoticeWidth, Mathf.Max(280f, Screen.width - 32f));
-                float x = Mathf.Max(10f, Screen.width - width - 16f);
+                Vector2 size = noticeStyle.CalcSize(new GUIContent(noticeText));
+                float width = Mathf.Min(size.x + 12f, Mathf.Max(120f, Screen.width - 32f));
+                float x = (Screen.width - width) * 0.5f;
                 Color oldColor = GUI.color;
                 int oldDepth = GUI.depth;
                 GUI.depth = -1000;
                 GUI.color = Color.white;
-                GUI.Box(new Rect(x, 14f, width, 42f), noticeText, noticeStyle);
+                GUI.Label(new Rect(x, 14f, width, 24f), noticeText, noticeStyle);
                 GUI.color = oldColor;
                 GUI.depth = oldDepth;
             }
@@ -306,12 +411,12 @@ namespace Blacknight2u.SARHControl
             {
                 return;
             }
-            noticeStyle = new GUIStyle(GUI.skin.box)
+            noticeStyle = new GUIStyle(GUI.skin.label)
             {
                 alignment = TextAnchor.MiddleCenter,
                 fontSize = 14,
                 fontStyle = FontStyle.Bold,
-                wordWrap = true
+                wordWrap = false
             };
             noticeStyle.normal.textColor = Color.white;
             sectionStyle = new GUIStyle(GUI.skin.label)
@@ -331,15 +436,16 @@ namespace Blacknight2u.SARHControl
         {
             settingsScroll = GUILayout.BeginScrollView(settingsScroll, false, true);
             GUILayout.Label("HOST / SERVER AUTHORITY", sectionStyle);
-            GUILayout.Label("Changes below are staged. Press Apply & Save to change live gameplay and notify modded clients.", hintStyle);
+            GUILayout.Label($"ACTIVE: {ActivePresetLabel(CurrentActivePreset)}", sectionStyle);
+            GUILayout.Label("F8 cycles VANILLA, PRESET 1, and PRESET 2. Edit one preset at a time below.", hintStyle);
             GUILayout.Space(8f);
 
-            GUILayout.Label("Mode", sectionStyle);
+            GUILayout.Label("Edit preset", sectionStyle);
             GUILayout.BeginHorizontal();
-            DrawModeButton(SarhMode.Vanilla, "OFF (VANILLA)");
-            DrawModeButton(SarhMode.Nerfed, "NERFED");
-            DrawModeButton(SarhMode.Disabled, "DISABLED");
+            DrawPresetTab(1, "PRESET 1");
+            DrawPresetTab(2, "PRESET 2");
             GUILayout.EndHorizontal();
+            GUILayout.Label("Changes are staged until Apply & Save. Apply or Revert before switching tabs.", hintStyle);
 
             GUILayout.Space(10f);
             GUILayout.Label("Affected missile types", sectionStyle);
@@ -363,14 +469,14 @@ namespace Blacknight2u.SARHControl
             GUILayout.EndHorizontal();
 
             GUILayout.Space(10f);
-            GUILayout.Label("Nerfed mode - percent of vanilla remaining", sectionStyle);
+            GUILayout.Label("Percent of vanilla remaining", sectionStyle);
             draftTrackingPercent = DrawSlider("Tracking strength", draftTrackingPercent, 0f, 100f, "%", 0);
             draftLockPercent = DrawSlider("Lock persistence", draftLockPercent, 0f, 100f, "%", 0);
             draftJamPercent = DrawSlider("Jam tolerance", draftJamPercent, 0f, 100f, "%", 0);
             draftThrustPercent = DrawSlider("Motor thrust", draftThrustPercent, 0f, 100f, "%", 0);
             draftSpeedPercent = DrawSlider("Top-speed limit", draftSpeedPercent, 0f, 100f, "%", 0);
             draftAimErrorPercent = DrawSlider("Aim error (% of range)", draftAimErrorPercent, 0f, 10f, "%", 1);
-            GUILayout.Label("Aim error is clamped to 25-400 m. Warhead damage remains 100% vanilla in Nerfed mode.", hintStyle);
+            GUILayout.Label("Both presets use these same settings. Warhead damage remains vanilla.", hintStyle);
 
             GUILayout.Space(12f);
             GUILayout.BeginHorizontal();
@@ -394,21 +500,23 @@ namespace Blacknight2u.SARHControl
                 SetSettingsVisible(false);
             }
             GUILayout.EndHorizontal();
-            GUILayout.Label("F7 opens/closes this panel. F8 still cycles the three modes.", hintStyle);
+            GUILayout.Label("F7 opens/closes this panel. F8 cycles VANILLA > PRESET 1 > PRESET 2.", hintStyle);
             GUILayout.EndScrollView();
             GUI.DragWindow(new Rect(0f, 0f, SettingsWindowWidth, 24f));
         }
 
-        private void DrawModeButton(SarhMode value, string label)
+        private void DrawPresetTab(int value, string label)
         {
             Color oldBackground = GUI.backgroundColor;
-            if (draftMode == value)
+            if (editingPreset == value) GUI.backgroundColor = new Color(0.35f, 0.75f, 1f, 1f);
+            if (GUILayout.Button(label, GUILayout.Height(30f)) && editingPreset != value)
             {
-                GUI.backgroundColor = new Color(0.35f, 0.75f, 1f, 1f);
-            }
-            if (GUILayout.Button(label, GUILayout.Height(30f)))
-            {
-                draftMode = value;
+                if (DraftDiffersFromConfig()) ShowNotice("Apply or Revert before switching presets");
+                else
+                {
+                    editingPreset = value;
+                    LoadDraftFromConfig();
+                }
             }
             GUI.backgroundColor = oldBackground;
         }
@@ -451,73 +559,75 @@ namespace Blacknight2u.SARHControl
 
         private void LoadDraftFromConfig()
         {
-            draftMode = CurrentMode;
-            draftAffectSarh = affectSarh?.Value ?? true;
-            draftAffectArh = affectArh?.Value ?? true;
-            draftAiToPlayer = affectAiToPlayer?.Value ?? true;
-            draftAiToAi = affectAiToAi?.Value ?? false;
-            draftPlayerToAi = affectPlayerToAi?.Value ?? false;
-            draftPlayerToPlayer = affectPlayerToPlayer?.Value ?? false;
-            draftTrackingPercent = trackingPercent?.Value ?? 50f;
-            draftLockPercent = lockPercent?.Value ?? 50f;
-            draftJamPercent = jamPercent?.Value ?? 50f;
-            draftThrustPercent = thrustPercent?.Value ?? 50f;
-            draftSpeedPercent = speedPercent?.Value ?? 50f;
-            draftAimErrorPercent = aimErrorPercent?.Value ?? 4f;
+            PresetConfig config = EditingConfig;
+            draftAffectSarh = config.AffectSarh.Value;
+            draftAffectArh = config.AffectArh.Value;
+            draftAiToPlayer = config.AiToPlayer.Value;
+            draftAiToAi = config.AiToAi.Value;
+            draftPlayerToAi = config.PlayerToAi.Value;
+            draftPlayerToPlayer = config.PlayerToPlayer.Value;
+            draftTrackingPercent = config.TrackingPercent.Value;
+            draftLockPercent = config.LockPercent.Value;
+            draftJamPercent = config.JamPercent.Value;
+            draftThrustPercent = config.ThrustPercent.Value;
+            draftSpeedPercent = config.SpeedPercent.Value;
+            draftAimErrorPercent = config.AimErrorPercent.Value;
         }
+
+        private PresetConfig EditingConfig => editingPreset == 2 ? preset2 : preset1;
 
         private void LoadDefaultDraft()
         {
-            draftMode = SarhMode.Nerfed;
             draftAffectSarh = true;
             draftAffectArh = true;
             draftAiToPlayer = true;
             draftAiToAi = false;
             draftPlayerToAi = false;
             draftPlayerToPlayer = false;
-            draftTrackingPercent = 50f;
-            draftLockPercent = 50f;
-            draftJamPercent = 50f;
-            draftThrustPercent = 50f;
-            draftSpeedPercent = 50f;
-            draftAimErrorPercent = 4f;
+            bool preset2Defaults = editingPreset == 2;
+            draftTrackingPercent = preset2Defaults ? 0f : 50f;
+            draftLockPercent = preset2Defaults ? 0f : 50f;
+            draftJamPercent = preset2Defaults ? 0f : 50f;
+            draftThrustPercent = preset2Defaults ? 0f : 50f;
+            draftSpeedPercent = preset2Defaults ? 0f : 50f;
+            draftAimErrorPercent = preset2Defaults ? 0f : 4f;
         }
 
         private bool DraftDiffersFromConfig()
         {
-            return draftMode != CurrentMode ||
-                   draftAffectSarh != affectSarh.Value ||
-                   draftAffectArh != affectArh.Value ||
-                   draftAiToPlayer != affectAiToPlayer.Value ||
-                   draftAiToAi != affectAiToAi.Value ||
-                   draftPlayerToAi != affectPlayerToAi.Value ||
-                   draftPlayerToPlayer != affectPlayerToPlayer.Value ||
-                   !Mathf.Approximately(draftTrackingPercent, trackingPercent.Value) ||
-                   !Mathf.Approximately(draftLockPercent, lockPercent.Value) ||
-                   !Mathf.Approximately(draftJamPercent, jamPercent.Value) ||
-                   !Mathf.Approximately(draftThrustPercent, thrustPercent.Value) ||
-                   !Mathf.Approximately(draftSpeedPercent, speedPercent.Value) ||
-                   !Mathf.Approximately(draftAimErrorPercent, aimErrorPercent.Value);
+            PresetConfig config = EditingConfig;
+            return draftAffectSarh != config.AffectSarh.Value ||
+                   draftAffectArh != config.AffectArh.Value ||
+                   draftAiToPlayer != config.AiToPlayer.Value ||
+                   draftAiToAi != config.AiToAi.Value ||
+                   draftPlayerToAi != config.PlayerToAi.Value ||
+                   draftPlayerToPlayer != config.PlayerToPlayer.Value ||
+                   !Mathf.Approximately(draftTrackingPercent, config.TrackingPercent.Value) ||
+                   !Mathf.Approximately(draftLockPercent, config.LockPercent.Value) ||
+                   !Mathf.Approximately(draftJamPercent, config.JamPercent.Value) ||
+                   !Mathf.Approximately(draftThrustPercent, config.ThrustPercent.Value) ||
+                   !Mathf.Approximately(draftSpeedPercent, config.SpeedPercent.Value) ||
+                   !Mathf.Approximately(draftAimErrorPercent, config.AimErrorPercent.Value);
         }
 
         private void ApplyDraft()
         {
             applyingSettings = true;
+            PresetConfig config = EditingConfig;
             try
             {
-                mode.Value = draftMode;
-                affectSarh.Value = draftAffectSarh;
-                affectArh.Value = draftAffectArh;
-                affectAiToPlayer.Value = draftAiToPlayer;
-                affectAiToAi.Value = draftAiToAi;
-                affectPlayerToAi.Value = draftPlayerToAi;
-                affectPlayerToPlayer.Value = draftPlayerToPlayer;
-                trackingPercent.Value = draftTrackingPercent;
-                lockPercent.Value = draftLockPercent;
-                jamPercent.Value = draftJamPercent;
-                thrustPercent.Value = draftThrustPercent;
-                speedPercent.Value = draftSpeedPercent;
-                aimErrorPercent.Value = draftAimErrorPercent;
+                config.AffectSarh.Value = draftAffectSarh;
+                config.AffectArh.Value = draftAffectArh;
+                config.AiToPlayer.Value = draftAiToPlayer;
+                config.AiToAi.Value = draftAiToAi;
+                config.PlayerToAi.Value = draftPlayerToAi;
+                config.PlayerToPlayer.Value = draftPlayerToPlayer;
+                config.TrackingPercent.Value = draftTrackingPercent;
+                config.LockPercent.Value = draftLockPercent;
+                config.JamPercent.Value = draftJamPercent;
+                config.ThrustPercent.Value = draftThrustPercent;
+                config.SpeedPercent.Value = draftSpeedPercent;
+                config.AimErrorPercent.Value = draftAimErrorPercent;
             }
             finally
             {
@@ -525,21 +635,16 @@ namespace Blacknight2u.SARHControl
             }
             Config.Save();
             LoadDraftFromConfig();
-            Logger.LogMessage($"Host radar missile settings applied: {BuildLocalStatusNotice()}.");
-            if (IsAuthoritativeHost)
-            {
-                BroadcastStatus();
-            }
-            ShowNotice(BuildLocalStatusNotice());
+            Logger.LogMessage($"Preset {editingPreset} saved.");
         }
 
-        private static string ModeLabel(SarhMode value)
+        private static string ActivePresetLabel(ActivePreset value)
         {
             switch (value)
             {
-                case SarhMode.Nerfed: return "NERFED";
-                case SarhMode.Disabled: return "DISABLED";
-                default: return "OFF (VANILLA)";
+                case ActivePreset.Preset1: return "PRESET 1";
+                case ActivePreset.Preset2: return "PRESET 2";
+                default: return "VANILLA";
             }
         }
 
@@ -547,10 +652,7 @@ namespace Blacknight2u.SARHControl
         {
             get
             {
-                byte mask = 0;
-                if (affectSarh?.Value ?? true) mask |= (byte)RadarSeekerKind.Sarh;
-                if (affectArh?.Value ?? true) mask |= (byte)RadarSeekerKind.Arh;
-                return mask;
+                return SeekerMask(CurrentPreset);
             }
         }
 
@@ -558,43 +660,37 @@ namespace Blacknight2u.SARHControl
         {
             get
             {
-                byte mask = 0;
-                if (affectAiToPlayer?.Value ?? true) mask |= 1;
-                if (affectAiToAi?.Value ?? false) mask |= 2;
-                if (affectPlayerToAi?.Value ?? false) mask |= 4;
-                if (affectPlayerToPlayer?.Value ?? false) mask |= 8;
-                return mask;
+                return EngagementMask(CurrentPreset);
             }
         }
 
-        private static string SeekerLabel(byte mask)
+        private static byte SeekerMask(PresetConfig config)
         {
-            bool sarh = (mask & (byte)RadarSeekerKind.Sarh) != 0;
-            bool arh = (mask & (byte)RadarSeekerKind.Arh) != 0;
-            if (sarh && arh) return "SARH+ARH";
-            if (sarh) return "SARH";
-            if (arh) return "ARH";
-            return "NO MISSILES";
+            byte mask = 0;
+            if (config?.AffectSarh.Value ?? true) mask |= (byte)RadarSeekerKind.Sarh;
+            if (config?.AffectArh.Value ?? true) mask |= (byte)RadarSeekerKind.Arh;
+            return mask;
         }
 
-        private static string EngagementLabel(byte mask)
+        private static byte EngagementMask(PresetConfig config)
         {
-            List<string> labels = new List<string>();
-            if ((mask & 1) != 0) labels.Add("AI>PLAYER");
-            if ((mask & 2) != 0) labels.Add("AI>AI");
-            if ((mask & 4) != 0) labels.Add("PLAYER>AI");
-            if ((mask & 8) != 0) labels.Add("PLAYER>PLAYER");
-            return labels.Count == 0 ? "NO ENGAGEMENTS" : string.Join("+", labels);
+            byte mask = 0;
+            if (config?.AiToPlayer.Value ?? true) mask |= 1;
+            if (config?.AiToAi.Value ?? false) mask |= 2;
+            if (config?.PlayerToAi.Value ?? false) mask |= 4;
+            if (config?.PlayerToPlayer.Value ?? false) mask |= 8;
+            return mask;
         }
 
         private static string BuildLocalStatusNotice()
         {
-            return $"RADAR MISSILES: {ModeLabel(CurrentMode)} | {SeekerLabel(CurrentSeekerMask)} | {EngagementLabel(CurrentEngagementMask)}";
+            return $"RADAR CONTROL: {ActivePresetLabel(CurrentActivePreset)}";
         }
 
         private static string BuildRemoteStatusNotice(SarhStatusMessage message)
         {
-            return $"RADAR MISSILES: {ModeLabel((SarhMode)message.Mode)} | {SeekerLabel(message.SeekerMask)} | {EngagementLabel(message.EngagementMask)} (HOST)";
+            ActivePreset selected = (ActivePreset)message.ActivePreset;
+            return $"RADAR CONTROL: {ActivePresetLabel(selected)}";
         }
 
         private void ShowNotice(string text)
@@ -606,41 +702,37 @@ namespace Blacknight2u.SARHControl
 
         private void SubscribeSettings()
         {
-            Subscribe(mode);
-            Subscribe(affectSarh);
-            Subscribe(affectArh);
-            Subscribe(affectAiToPlayer);
-            Subscribe(affectAiToAi);
-            Subscribe(affectPlayerToAi);
-            Subscribe(affectPlayerToPlayer);
-            Subscribe(trackingPercent);
-            Subscribe(lockPercent);
-            Subscribe(jamPercent);
-            Subscribe(thrustPercent);
-            Subscribe(speedPercent);
-            Subscribe(aimErrorPercent);
+            Subscribe(activePreset);
+            SubscribePreset(preset1);
+            SubscribePreset(preset2);
         }
 
         private void UnsubscribeSettings()
         {
-            Unsubscribe(mode);
-            Unsubscribe(affectSarh);
-            Unsubscribe(affectArh);
-            Unsubscribe(affectAiToPlayer);
-            Unsubscribe(affectAiToAi);
-            Unsubscribe(affectPlayerToAi);
-            Unsubscribe(affectPlayerToPlayer);
-            Unsubscribe(trackingPercent);
-            Unsubscribe(lockPercent);
-            Unsubscribe(jamPercent);
-            Unsubscribe(thrustPercent);
-            Unsubscribe(speedPercent);
-            Unsubscribe(aimErrorPercent);
+            Unsubscribe(activePreset);
+            UnsubscribePreset(preset1);
+            UnsubscribePreset(preset2);
+        }
+
+        private void SubscribePreset(PresetConfig config)
+        {
+            Subscribe(config.AffectSarh); Subscribe(config.AffectArh);
+            Subscribe(config.AiToPlayer); Subscribe(config.AiToAi); Subscribe(config.PlayerToAi); Subscribe(config.PlayerToPlayer);
+            Subscribe(config.TrackingPercent); Subscribe(config.LockPercent); Subscribe(config.JamPercent);
+            Subscribe(config.ThrustPercent); Subscribe(config.SpeedPercent); Subscribe(config.AimErrorPercent);
+        }
+
+        private void UnsubscribePreset(PresetConfig config)
+        {
+            Unsubscribe(config?.AffectSarh); Unsubscribe(config?.AffectArh);
+            Unsubscribe(config?.AiToPlayer); Unsubscribe(config?.AiToAi); Unsubscribe(config?.PlayerToAi); Unsubscribe(config?.PlayerToPlayer);
+            Unsubscribe(config?.TrackingPercent); Unsubscribe(config?.LockPercent); Unsubscribe(config?.JamPercent);
+            Unsubscribe(config?.ThrustPercent); Unsubscribe(config?.SpeedPercent); Unsubscribe(config?.AimErrorPercent);
         }
 
         private void Subscribe<T>(ConfigEntry<T> entry)
         {
-            entry.SettingChanged += OnSettingsChanged;
+            if (entry != null) entry.SettingChanged += OnSettingsChanged;
         }
 
         private void Unsubscribe<T>(ConfigEntry<T> entry)
@@ -655,12 +747,12 @@ namespace Blacknight2u.SARHControl
                 return;
             }
             Config.Save();
-            if (settingsVisible)
+            if (settingsVisible && !ReferenceEquals(sender, activePreset))
             {
                 LoadDraftFromConfig();
             }
             Logger.LogMessage($"Configured host radar missile settings changed: {BuildLocalStatusNotice()}.");
-            if (IsAuthoritativeHost)
+            if (IsAuthoritativeHost && ReferenceEquals(sender, activePreset))
             {
                 BroadcastStatus();
             }
@@ -701,7 +793,7 @@ namespace Blacknight2u.SARHControl
                     clientHandler = nextClientHandler;
                     registeredClient = manager.Client;
                     registeredClient.Authenticated.AddListener(OnClientAuthenticated);
-                    synchronizedStatusSignature = null;
+                    synchronizedActivePreset = null;
                 }
             }
         }
@@ -712,6 +804,7 @@ namespace Blacknight2u.SARHControl
             {
                 return;
             }
+            synchronizedActivePreset = null;
             NetworkManagerNuclearOption.i.Client.Send(new SarhHelloMessage
             {
                 ProtocolVersion = ProtocolVersion
@@ -732,31 +825,17 @@ namespace Blacknight2u.SARHControl
         private void HandleStatus(INetworkPlayer player, SarhStatusMessage message)
         {
             if (message.ProtocolVersion != ProtocolVersion ||
-                message.Mode > (byte)SarhMode.Disabled ||
-                (message.SeekerMask & ~3) != 0 ||
-                (message.EngagementMask & ~15) != 0 ||
-                message.TrackingPercent > 100 ||
-                message.LockPercent > 100 ||
-                message.JamPercent > 100 ||
-                message.ThrustPercent > 100 ||
-                message.SpeedPercent > 100 ||
-                message.AimErrorTenths > 100)
+                message.ActivePreset > (byte)ActivePreset.Preset2)
             {
                 return;
             }
-            SarhMode nextMode = (SarhMode)message.Mode;
-            string nextSignature = StatusSignature(message);
-            bool changed = synchronizedStatusSignature != null && synchronizedStatusSignature != nextSignature;
-            synchronizedStatusSignature = nextSignature;
+            bool changed = synchronizedActivePreset.HasValue &&
+                           synchronizedActivePreset.Value != message.ActivePreset;
+            synchronizedActivePreset = message.ActivePreset;
             if (changed)
             {
                 ShowNotice(BuildRemoteStatusNotice(message));
             }
-        }
-
-        private static string StatusSignature(SarhStatusMessage message)
-        {
-            return $"{message.Mode}:{message.SeekerMask}:{message.EngagementMask}:{message.TrackingPercent}:{message.LockPercent}:{message.JamPercent}:{message.ThrustPercent}:{message.SpeedPercent}:{message.AimErrorTenths}";
         }
 
         private void BroadcastStatus()
@@ -777,21 +856,8 @@ namespace Blacknight2u.SARHControl
             player.Send(new SarhStatusMessage
             {
                 ProtocolVersion = ProtocolVersion,
-                Mode = (byte)CurrentMode,
-                SeekerMask = CurrentSeekerMask,
-                EngagementMask = CurrentEngagementMask,
-                TrackingPercent = PercentByte(trackingPercent, 50f),
-                LockPercent = PercentByte(lockPercent, 50f),
-                JamPercent = PercentByte(jamPercent, 50f),
-                ThrustPercent = PercentByte(thrustPercent, 50f),
-                SpeedPercent = PercentByte(speedPercent, 50f),
-                AimErrorTenths = (byte)Mathf.Clamp(Mathf.RoundToInt((aimErrorPercent?.Value ?? 4f) * 10f), 0, 100)
+                ActivePreset = (byte)CurrentActivePreset
             });
-        }
-
-        private static byte PercentByte(ConfigEntry<float> entry, float fallback)
-        {
-            return (byte)Mathf.Clamp(Mathf.RoundToInt(entry?.Value ?? fallback), 0, 100);
         }
 
         private void UnregisterClientHandler()
@@ -861,17 +927,6 @@ namespace Blacknight2u.SARHControl
             return (CurrentEngagementMask & route) != 0;
         }
 
-        internal static bool ShouldAffectLauncher(MissileLauncher launcher, Unit owner, Unit target)
-        {
-            if (launcher == null || launcher.missile == null || launcher.missile.unitPrefab == null)
-            {
-                return false;
-            }
-            RadarSeekerKind kind = RadarSeekerKind.None;
-            if (launcher.missile.unitPrefab.GetComponent<SARHSeeker>() != null) kind |= RadarSeekerKind.Sarh;
-            if (launcher.missile.unitPrefab.GetComponent<ARHSeeker>() != null) kind |= RadarSeekerKind.Arh;
-            return ShouldAffect(kind, owner, target);
-        }
     }
 
     internal static class SarhNetworkProtocol
@@ -912,15 +967,7 @@ namespace Blacknight2u.SARHControl
         private static void WriteStatus(NetworkWriter writer, SarhStatusMessage message)
         {
             writer.WriteByte(message.ProtocolVersion);
-            writer.WriteByte(message.Mode);
-            writer.WriteByte(message.SeekerMask);
-            writer.WriteByte(message.EngagementMask);
-            writer.WriteByte(message.TrackingPercent);
-            writer.WriteByte(message.LockPercent);
-            writer.WriteByte(message.JamPercent);
-            writer.WriteByte(message.ThrustPercent);
-            writer.WriteByte(message.SpeedPercent);
-            writer.WriteByte(message.AimErrorTenths);
+            writer.WriteByte(message.ActivePreset);
         }
 
         private static SarhStatusMessage ReadStatus(NetworkReader reader)
@@ -928,15 +975,7 @@ namespace Blacknight2u.SARHControl
             return new SarhStatusMessage
             {
                 ProtocolVersion = reader.ReadByte(),
-                Mode = reader.ReadByte(),
-                SeekerMask = reader.ReadByte(),
-                EngagementMask = reader.ReadByte(),
-                TrackingPercent = reader.ReadByte(),
-                LockPercent = reader.ReadByte(),
-                JamPercent = reader.ReadByte(),
-                ThrustPercent = reader.ReadByte(),
-                SpeedPercent = reader.ReadByte(),
-                AimErrorTenths = reader.ReadByte()
+                ActivePreset = reader.ReadByte()
             };
         }
     }
@@ -956,12 +995,7 @@ namespace Blacknight2u.SARHControl
             internal Array Motors;
             internal float[] OriginalThrust;
             internal float[] OriginalTopSpeed;
-            internal float OriginalBlastYield;
-            internal float OriginalPierceDamage;
-            internal Missile.Warhead Warhead;
-            internal bool OriginalArmed;
-            internal Unit TargetBeforeDisabled;
-            internal SarhMode? AppliedMode;
+            internal bool NerfApplied;
         }
 
         private static readonly FieldInfo SeekerMissileField = AccessTools.Field(typeof(MissileSeeker), "missile");
@@ -975,9 +1009,6 @@ namespace Blacknight2u.SARHControl
         private static readonly Type MotorType = typeof(Missile).GetNestedType("Motor", BindingFlags.NonPublic);
         private static readonly FieldInfo MotorThrustField = AccessTools.Field(MotorType, "thrust");
         private static readonly FieldInfo MotorTopSpeedField = AccessTools.Field(MotorType, "topSpeed");
-        private static readonly FieldInfo BlastYieldField = AccessTools.Field(typeof(Missile), "blastYield");
-        private static readonly FieldInfo PierceDamageField = AccessTools.Field(typeof(Missile), "pierceDamage");
-        private static readonly FieldInfo WarheadField = AccessTools.Field(typeof(Missile), "warhead");
         private static readonly ConditionalWeakTable<Missile, MissileState> States = new ConditionalWeakTable<Missile, MissileState>();
 
         internal static bool ReflectionReady =>
@@ -986,8 +1017,7 @@ namespace Blacknight2u.SARHControl
             ArhLockPersistenceField != null && ArhJamToleranceField != null &&
             ArhLastActiveTrackAttemptField != null &&
             MotorsField != null &&
-            MotorType != null && MotorThrustField != null && MotorTopSpeedField != null &&
-            BlastYieldField != null && PierceDamageField != null && WarheadField != null;
+            MotorType != null && MotorThrustField != null && MotorTopSpeedField != null;
 
         internal static void Register(MissileSeeker seeker, Unit target)
         {
@@ -1018,7 +1048,6 @@ namespace Blacknight2u.SARHControl
             {
                 return;
             }
-            Missile.Warhead warhead = WarheadField.GetValue(missile) as Missile.Warhead;
             Array motors = MotorsField.GetValue(missile) as Array;
             int motorCount = motors?.Length ?? 0;
             float[] originalThrust = new float[motorCount];
@@ -1044,83 +1073,45 @@ namespace Blacknight2u.SARHControl
                 OriginalJamTolerance = (float)jamToleranceField.GetValue(seeker),
                 Motors = motors,
                 OriginalThrust = originalThrust,
-                OriginalTopSpeed = originalTopSpeed,
-                OriginalBlastYield = (float)BlastYieldField.GetValue(missile),
-                OriginalPierceDamage = (float)PierceDamageField.GetValue(missile),
-                Warhead = warhead,
-                OriginalArmed = warhead != null && warhead.Armed
+                OriginalTopSpeed = originalTopSpeed
             });
         }
 
-        internal static bool ApplyCurrentMode(MissileSeeker seeker)
+        internal static void ApplyCurrentPreset(MissileSeeker seeker)
         {
             if (!Plugin.IsAuthoritativeHost)
             {
-                return true;
+                return;
             }
             Missile missile = GetMissile(seeker);
             if (missile == null || !States.TryGetValue(missile, out MissileState state))
             {
-                return true;
+                return;
             }
 
-            if (state.AppliedMode != SarhMode.Disabled)
+            Unit currentTarget = SeekerTargetField.GetValue(state.Seeker) as Unit;
+            if (currentTarget != null)
             {
-                Unit currentTarget = SeekerTargetField.GetValue(state.Seeker) as Unit;
-                if (currentTarget != null)
+                state.TargetIsHuman = Plugin.IsHumanControlled(currentTarget);
+            }
+
+            if (!Plugin.PresetActive || !IsAffected(state))
+            {
+                if (state.NerfApplied)
                 {
-                    state.TargetIsHuman = Plugin.IsHumanControlled(currentTarget);
+                    Restore(state);
+                    state.NerfApplied = false;
                 }
+                return;
             }
 
-            if (!IsAffected(state))
-            {
-                if (state.AppliedMode.HasValue)
-                {
-                    Restore(missile, state);
-                    state.AppliedMode = null;
-                }
-                return true;
-            }
-
-            SarhMode currentMode = Plugin.CurrentMode;
-            if (state.AppliedMode != currentMode)
-            {
-                Restore(missile, state);
-                if (currentMode == SarhMode.Disabled)
-                {
-                    state.TargetBeforeDisabled = SeekerTargetField.GetValue(state.Seeker) as Unit;
-                    BlastYieldField.SetValue(missile, 0f);
-                    PierceDamageField.SetValue(missile, 0f);
-                    if (state.Warhead != null)
-                    {
-                        state.Warhead.Armed = false;
-                    }
-                }
-                state.AppliedMode = currentMode;
-            }
-
-            if (currentMode == SarhMode.Nerfed)
-            {
-                ApplyFlightNerf(state);
-            }
-
-            if (currentMode != SarhMode.Disabled)
-            {
-                return true;
-            }
-            if (state.Warhead != null)
-            {
-                state.Warhead.Armed = false;
-            }
-            missile.SetTarget(null);
-            missile.SetAimpoint(missile.GlobalPosition() + missile.transform.forward * 100000f, Vector3.zero);
-            return false;
+            ApplyFlightNerf(state);
+            state.NerfApplied = true;
         }
 
         internal static bool ShouldNerf(MissileSeeker seeker)
         {
-            if (!Plugin.IsAuthoritativeHost || Plugin.CurrentMode != SarhMode.Nerfed)
+            if (!Plugin.IsAuthoritativeHost || !Plugin.PresetActive)
             {
                 return false;
             }
@@ -1139,7 +1130,7 @@ namespace Blacknight2u.SARHControl
         internal static void ApplyAimError(Missile missile, ref GlobalPosition aimPoint)
         {
             if (!Plugin.IsAuthoritativeHost ||
-                Plugin.CurrentMode != SarhMode.Nerfed ||
+                !Plugin.PresetActive ||
                 missile == null ||
                 !States.TryGetValue(missile, out MissileState state) ||
                 !IsAffected(state))
@@ -1188,7 +1179,7 @@ namespace Blacknight2u.SARHControl
             return state != null && Plugin.ShouldAffect(state.Kind, state.OwnerIsHuman, state.TargetIsHuman);
         }
 
-        private static void Restore(Missile missile, MissileState state)
+        private static void Restore(MissileState state)
         {
             state.PersistenceField.SetValue(state.Seeker, state.OriginalLockPersistence);
             state.JamToleranceField.SetValue(state.Seeker, state.OriginalJamTolerance);
@@ -1201,18 +1192,6 @@ namespace Blacknight2u.SARHControl
                     MotorThrustField.SetValue(motor, state.OriginalThrust[i]);
                     MotorTopSpeedField.SetValue(motor, state.OriginalTopSpeed[i]);
                 }
-            }
-            BlastYieldField.SetValue(missile, state.OriginalBlastYield);
-            PierceDamageField.SetValue(missile, state.OriginalPierceDamage);
-            if (state.Warhead != null)
-            {
-                state.Warhead.Armed = state.OriginalArmed;
-            }
-            if (state.AppliedMode == SarhMode.Disabled &&
-                state.TargetBeforeDisabled != null &&
-                !state.TargetBeforeDisabled.disabled)
-            {
-                missile.SetTarget(state.TargetBeforeDisabled);
             }
         }
 
@@ -1228,16 +1207,16 @@ namespace Blacknight2u.SARHControl
         private static void Postfix(SARHSeeker __instance, Unit target)
         {
             SarhController.Register(__instance, target);
-            SarhController.ApplyCurrentMode(__instance);
+            SarhController.ApplyCurrentPreset(__instance);
         }
     }
 
     [HarmonyPatch(typeof(SARHSeeker), nameof(SARHSeeker.Seek))]
     internal static class SarhSeekPatch
     {
-        private static bool Prefix(SARHSeeker __instance)
+        private static void Prefix(SARHSeeker __instance)
         {
-            return SarhController.ApplyCurrentMode(__instance);
+            SarhController.ApplyCurrentPreset(__instance);
         }
     }
 
@@ -1247,16 +1226,16 @@ namespace Blacknight2u.SARHControl
         private static void Postfix(ARHSeeker __instance, Unit target)
         {
             SarhController.Register(__instance, target);
-            SarhController.ApplyCurrentMode(__instance);
+            SarhController.ApplyCurrentPreset(__instance);
         }
     }
 
     [HarmonyPatch(typeof(ARHSeeker), nameof(ARHSeeker.Seek))]
     internal static class ArhSeekPatch
     {
-        private static bool Prefix(ARHSeeker __instance)
+        private static void Prefix(ARHSeeker __instance)
         {
-            return SarhController.ApplyCurrentMode(__instance);
+            SarhController.ApplyCurrentPreset(__instance);
         }
     }
 
@@ -1298,19 +1277,4 @@ namespace Blacknight2u.SARHControl
         }
     }
 
-    [HarmonyPatch(typeof(MissileLauncher), nameof(MissileLauncher.Fire))]
-    internal static class RadarMissileLaunchPatch
-    {
-        private static bool Prefix(MissileLauncher __instance, Unit owner, Unit target)
-        {
-            if (!Plugin.IsAuthoritativeHost ||
-                Plugin.CurrentMode != SarhMode.Disabled ||
-                !Plugin.ShouldAffectLauncher(__instance, owner, target))
-            {
-                return true;
-            }
-            Plugin.Log?.LogDebug("Blocked a selected radar-missile launch for an affected engagement route.");
-            return false;
-        }
-    }
 }
