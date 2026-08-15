@@ -1,6 +1,6 @@
 # Radar Missile Control
 
-A BepInEx 5/Harmony mod for Nuclear Option 0.34.1 that lets the host configure two radar-missile presets: what they affect and the gameplay values each preset applies.
+A BepInEx 5/Harmony mod for Nuclear Option 0.34.2 that lets the host configure two radar-missile presets: what they affect and the gameplay values each preset applies.
 
 ## Exact scope
 

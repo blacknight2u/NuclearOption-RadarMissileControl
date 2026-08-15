@@ -20,7 +20,7 @@ if (!$pluginVersionMatch.Success -or $pluginVersionMatch.Groups[1].Value -ne $ve
 $modId = 'blacknight2u.sarhcontrol'
 $displayName = 'Radar Missile Control'
 $description = 'Host-controlled SARH and ARH missile presets. Press F7 to configure missile types, AI/player engagements, guidance, accuracy, thrust, and speed. Press F8 to cycle Vanilla, Preset 1, and Preset 2. Multiplayer settings remain host-authoritative.'
-$gameVersion = '0.34.1'
+$gameVersion = '0.34.2'
 $tags = @('gameplay', 'difficulty', 'sarh', 'arh', 'configurable', 'host-only', 'multiplayer')
 $authors = @('blacknight2u')
 $githubOwner = 'blacknight2u'

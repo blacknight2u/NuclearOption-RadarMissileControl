@@ -1,11 +1,19 @@
 # Investigation notes
 
-Environment verified on 2026-08-11:
+Environment verified on 2026-08-15:
 
-- Nuclear Option 0.34.1
+- Nuclear Option 0.34.2 (Steam build 24724372)
 - Unity 2022.3.62f2, Mono scripting backend
 - BepInEx 5.4.23.4
 - Harmony 2.9.0
+
+0.34.2 compatibility audit:
+
+- v0.5.1 loaded on 0.34.2 without plugin, Harmony, missing-method, or type-load errors.
+- A clean warnings-as-errors build against the updated game assemblies completed with zero warnings and zero errors.
+- All Harmony targets retain their expected signatures: `SARHSeeker.Initialize`, `SARHSeeker.Seek`, `SARHSeeker.GetTrackingStrength`, `ARHSeeker.Initialize`, `ARHSeeker.Seek`, `ARHSeeker.GetRadarReturn`, and `Missile.SetAimpoint`.
+- All reflected fields retain their expected declaring types and value types: seeker missile/target references; SARH/ARH persistence, jamming, and scan-time fields; the missile motor array; and motor thrust/top-speed fields.
+- The published v0.5.1 DLL and a fresh 0.34.2 build have identical normalized IL and assembly-reference identities. Their file hashes differ only because rebuild-specific module/debug metadata changed, so no replacement DLL is required.
 
 Relevant game flow:
 
