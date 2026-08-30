@@ -1,6 +1,6 @@
 # Investigation notes
 
-Environment verified on 2026-08-15:
+Environment verified on 2026-08-30:
 
 - Nuclear Option 0.34.2 (Steam build 24724372)
 - Unity 2022.3.62f2, Mono scripting backend
@@ -9,6 +9,8 @@ Environment verified on 2026-08-15:
 
 0.34.2 compatibility audit:
 
+- Reverified against the currently installed Steam build 24724372. `Assembly-CSharp.dll` SHA-256 is `eb3b93bdaec37dd7b3bab72f801a2c84e5be2ae3c559f39251e2320ae6b11ccc`; the build and every reflected field/Harmony target below remain valid.
+- v0.5.2 changes version and compatibility metadata only; gameplay behavior and multiplayer protocol remain unchanged from v0.5.1.
 - v0.5.1 loaded on 0.34.2 without plugin, Harmony, missing-method, or type-load errors.
 - A clean warnings-as-errors build against the updated game assemblies completed with zero warnings and zero errors.
 - All Harmony targets retain their expected signatures: `SARHSeeker.Initialize`, `SARHSeeker.Seek`, `SARHSeeker.GetTrackingStrength`, `ARHSeeker.Initialize`, `ARHSeeker.Seek`, `ARHSeeker.GetRadarReturn`, and `Missile.SetAimpoint`.

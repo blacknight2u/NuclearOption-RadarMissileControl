@@ -58,7 +58,7 @@ namespace Blacknight2u.SARHControl
     {
         public const string PluginGuid = "blacknight2u.sarhcontrol";
         public const string PluginName = "Radar Missile Control";
-        public const string PluginVersion = "0.5.1";
+        public const string PluginVersion = "0.5.2";
 
         private const byte ProtocolVersion = 6;
         private const float SettingsWindowWidth = 520f;

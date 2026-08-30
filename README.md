@@ -81,6 +81,6 @@ Run:
 .\scripts\Build-Package.ps1
 ```
 
-The NOMM-ready archive is written to `artifacts/SARHControl-v0.5.1.zip`.
+The NOMM-ready archive is written to `artifacts/SARHControl-v0.5.2.zip`.
 
 Game updates can change internal type or field names. Rebuild and retest against the current `Assembly-CSharp.dll` after a Nuclear Option update.
