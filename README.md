@@ -1,6 +1,6 @@
 # Radar Missile Control
 
-A BepInEx 5/Harmony mod for Nuclear Option 0.34.2 that lets the host configure two radar-missile presets: what they affect and the gameplay values each preset applies.
+A BepInEx 5/Harmony mod for Nuclear Option 0.34.6 that lets the host configure two radar-missile presets: what they affect and the gameplay values each preset applies.
 
 ## Exact scope
 
@@ -81,6 +81,6 @@ Run:
 .\scripts\Build-Package.ps1
 ```
 
-The NOMM-ready archive is written to `artifacts/SARHControl-v0.5.2.zip`.
+The NOMM-ready archive is written to `artifacts/SARHControl-v0.5.3.zip`.
 
 Game updates can change internal type or field names. Rebuild and retest against the current `Assembly-CSharp.dll` after a Nuclear Option update.

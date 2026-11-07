@@ -20,7 +20,7 @@ if (!$pluginVersionMatch.Success -or $pluginVersionMatch.Groups[1].Value -ne $ve
 $modId = 'blacknight2u.sarhcontrol'
 $displayName = 'Radar Missile Control'
 $description = 'Host-controlled SARH and ARH missile presets. Press F7 to configure missile types, AI/player engagements, guidance, accuracy, thrust, and speed. Press F8 to cycle Vanilla, Preset 1, and Preset 2. Multiplayer settings remain host-authoritative.'
-$gameVersion = '0.34.2'
+$gameVersion = '0.34.6'
 $tags = @('gameplay', 'difficulty', 'sarh', 'arh', 'configurable', 'host-only', 'multiplayer')
 $authors = @('blacknight2u')
 $githubOwner = 'blacknight2u'
@@ -38,13 +38,27 @@ $urls = @(
 $artifacts = Join-Path $projectRoot 'artifacts'
 $staging = Join-Path $artifacts $modId
 $zipPath = Join-Path $artifacts $releaseFileName
+if (Test-Path -LiteralPath $zipPath) {
+    throw "Refusing to replace an existing release: $zipPath"
+}
 
 dotnet build $project -c $Configuration -p:GameDir="$GameDir"
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
+$dll = Join-Path $projectRoot "bin\$Configuration\SARHControl.dll"
+& (Join-Path $PSScriptRoot 'Test-GameCompatibility.ps1') -PluginAssembly $dll `
+    -SourceDirectory (Join-Path $projectRoot 'src') -GameDir $GameDir `
+    -OutputPath (Join-Path $artifacts 'compatibility\game-api.json')
+
 if (Test-Path -LiteralPath $staging) {
+    $resolvedStaging = [IO.Path]::GetFullPath($staging)
+    $allowedParent = [IO.Path]::GetFullPath($artifacts).TrimEnd('\') + '\'
+    if (!$resolvedStaging.StartsWith($allowedParent, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($resolvedStaging) -ne $modId) {
+        throw "Unsafe staging path: $resolvedStaging"
+    }
     Remove-Item -LiteralPath $staging -Recurse -Force
 }
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
@@ -76,9 +90,6 @@ $meta = [ordered]@{
 }
 $meta | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $staging 'meta.json') -Encoding utf8
 
-if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
-}
 Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zipPath -CompressionLevel Optimal
 
 $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()

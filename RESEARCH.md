@@ -1,5 +1,21 @@
 # Investigation notes
 
+## Nuclear Option 0.34.6 compatibility (2026-11-07)
+
+- Steam build 26327221; `Assembly-CSharp.dll` SHA-256
+  `babdd626bbab5f01e6c244150c1e77c57c131ee86967214e2e5ced6d813c2bce`.
+- v0.5.3 updates version and compatibility metadata. Gameplay code, configuration
+  migration, authority rules and protocol version 6 are unchanged from v0.5.2.
+- Release build with warnings treated as errors: zero warnings and errors.
+- `scripts/Test-GameCompatibility.ps1` checks all seven Harmony targets and hook
+  arguments, all ten reflected fields, and 28 compiled game/network references.
+  All checks pass. The detailed report is generated under `artifacts/compatibility`.
+- `Build-Package.ps1` runs the audit before packaging and refuses to overwrite an
+  existing release archive.
+- These are build/static checks. No 0.34.6 flight or multiplayer session was run.
+
+## Earlier verification
+
 Environment verified on 2026-08-30:
 
 - Nuclear Option 0.34.2 (Steam build 24724372)
